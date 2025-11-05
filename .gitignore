@@ -1,0 +1,15 @@
+# Ignore local data files
+data/
+*.csv
+*.json
+
+# Ignore config files with secrets
+backend/config.py
+
+# Ignore Python cache
+__pycache__/
+*.pyc
+.DS_Store
+
+# Virtual environment
+venv/

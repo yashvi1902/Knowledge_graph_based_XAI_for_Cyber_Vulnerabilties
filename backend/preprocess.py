@@ -99,16 +99,6 @@ pd.DataFrame(cve_product_rows).to_csv(DATA_DIR / "cve_affects_product.csv", inde
 print(f" Products table: {len(product_set)} products, {len(cve_product_rows)} mappings")
 
 # -------------------------------
-# ExploitDB CSV
-exploitdb_path = DATA_DIR / "exploitdb.csv"
-if exploitdb_path.exists():
-    exploits = pd.read_csv(exploitdb_path)
-    exploits.to_csv(DATA_DIR / "exploits.csv", index=False)
-    print(f" Exploits table: {len(exploits)} rows")
-else:
-    print(" ExploitDB CSV not found!")
-
-# -------------------------------
 # CISA KEV JSON → CSV
 cisa_path = DATA_DIR / "cisa_kev.json"
 if cisa_path.exists():
