@@ -3,7 +3,7 @@ data/
 *.csv
 *.json
 
-# Ignore config files with secrets
+# Ignore config files
 backend/config.py
 
 # Ignore Python cache
