@@ -41,22 +41,81 @@ class GraphBuilder:
     # -----------------------------------------
     # INGEST FUNCTIONS
     # -----------------------------------------
+    def _extract_valid_cvss(self, cve: dict):
+        cvss = cve.get("cvss") or {}
+
+        def extract(metric):
+            if not metric:
+                return None
+            m = metric[0]  # always take first metric
+            details = m.get("details") or {}
+
+            return {
+                "score": m.get("baseScore"),
+                "severity": m.get("baseSeverity"),
+                "vector": m.get("vectorString") or details.get("vectorString"),
+                "attackVector": details.get("attackVector"),
+                "attackComplexity": details.get("attackComplexity"),
+                "privilegesRequired": details.get("privilegesRequired"),
+                "userInteraction": details.get("userInteraction"),
+                "scope": details.get("scope"),
+                "confidentialityImpact": details.get("confidentialityImpact"),
+                "integrityImpact": details.get("integrityImpact"),
+                "availabilityImpact": details.get("availabilityImpact"),
+            }
+
+        # PRIORITY: v4.0 → v3.1 → v3.0
+        if cvss.get("cvssMetricV40"):
+            return extract(cvss["cvssMetricV40"]), "v4_0"
+
+        if cvss.get("cvssMetricV31"):
+            return extract(cvss["cvssMetricV31"]), "v3_1"
+
+        if cvss.get("cvssMetricV30"):
+            return extract(cvss["cvssMetricV30"]), "v3_0"
+
+        return None, None
+
     def ingest_cve(self, tx, cve):
         cve_id = cve["cve_id"]
 
-        # Skip CVEs not in ExploitDB
+        # --- Filter: ExploitDB only ---
         if cve_id not in self.exploit_cve_set:
             return
 
-        # Skip CVEs if all CVSS versions are missing
-        cvss = cve.get("cvss", {})
-        # cvss_versions = ["cvssMetricV31", "cvssMetricV30", "cvssMetricV40", "cvssMetricV2"]
-        # total count was 24725 CVEs, to reduce size we only consider v3.0, v3.1, v4.0
-        cvss_versions = ["cvssMetricV31", "cvssMetricV30", "cvssMetricV40"]
-        if not any(cvss.get(v) for v in cvss_versions):
-            return 
+        # --- Extract CVSS data (v4 or v3 only) ---
+        cvss_props, version_key = self._extract_valid_cvss(cve)
+        if not cvss_props or cvss_props["score"] is None:
+            return  # skip if no v4/v3 scores
 
-        # Basic CVE info
+        # --- Build property map ---
+        props = {
+            "cve_id": cve_id,
+            "published": cve.get("published"),
+            "last_modified": cve.get("last_modified"),
+            "status": cve.get("status"),
+            "source": cve.get("source"),
+            "desc_en": cve.get("descriptions", {}).get("en"),
+            "desc_es": cve.get("descriptions", {}).get("es"),
+
+            # CVSS main
+            "cvss_version": version_key,
+            "cvss_score": cvss_props["score"],
+            "cvss_severity": cvss_props["severity"],
+            "cvss_vector": cvss_props["vector"],
+
+            # CVSS full details
+            "cvss_attackVector": cvss_props["attackVector"],
+            "cvss_attackComplexity": cvss_props["attackComplexity"],
+            "cvss_privilegesRequired": cvss_props["privilegesRequired"],
+            "cvss_userInteraction": cvss_props["userInteraction"],
+            "cvss_scope": cvss_props["scope"],
+            "cvss_confidentialityImpact": cvss_props["confidentialityImpact"],
+            "cvss_integrityImpact": cvss_props["integrityImpact"],
+            "cvss_availabilityImpact": cvss_props["availabilityImpact"]
+        }
+
+        # --- Save CVE node ---
         tx.run("""
             MERGE (c:CVE {cve_id: $cve_id})
             SET c.published = $published,
@@ -64,16 +123,22 @@ class GraphBuilder:
                 c.status = $status,
                 c.source = $source,
                 c.description_en = $desc_en,
-                c.description_es = $desc_es
-        """, {
-            "cve_id": cve_id,
-            "published": cve.get("published"),
-            "last_modified": cve.get("last_modified"),
-            "status": cve.get("status"),
-            "source": cve.get("source"),
-            "desc_en": cve.get("descriptions", {}).get("en"),
-            "desc_es": cve.get("descriptions", {}).get("es")
-        })
+                c.description_es = $desc_es,
+
+                c.cvss_version = $cvss_version,
+                c.cvss_score = $cvss_score,
+                c.cvss_severity = $cvss_severity,
+                c.cvss_vector = $cvss_vector,
+
+                c.cvss_attackVector = $cvss_attackVector,
+                c.cvss_attackComplexity = $cvss_attackComplexity,
+                c.cvss_privilegesRequired = $cvss_privilegesRequired,
+                c.cvss_userInteraction = $cvss_userInteraction,
+                c.cvss_scope = $cvss_scope,
+                c.cvss_confidentialityImpact = $cvss_confidentialityImpact,
+                c.cvss_integrityImpact = $cvss_integrityImpact,
+                c.cvss_availabilityImpact = $cvss_availabilityImpact
+        """, props)
 
         # CWEs
         for w in cve.get("weaknesses", []):
@@ -99,12 +164,6 @@ class GraphBuilder:
                 "product": parts[4],
                 "version": parts[5] if parts[5] not in ["*", "-"] else 'Not Specified',
                 "update": parts[6] if parts[6] not in ["*", "-"] else 'Not Specified',
-                "edition": parts[7] if parts[7] not in ["*", "-"] else 'Not Specified',
-                "language": parts[8] if parts[8] not in ["*", "-"] else 'Not Specified',
-                "sw_edition": parts[9] if parts[9] not in ["*", "-"] else 'Not Specified',
-                "target_sw": parts[10] if parts[10] not in ["*", "-"] else 'Not Specified',
-                "target_hw": parts[11] if parts[11] not in ["*", "-"] else 'Not Specified',
-                "other": parts[12] if parts[12] not in ["*", "-"] else 'Not Specified'
             }
 
             tx.run("""
@@ -115,12 +174,6 @@ class GraphBuilder:
                     cpe.product = $product,
                     cpe.version = $version,
                     cpe.update = $update,
-                    cpe.edition = $edition,
-                    cpe.language = $language,
-                    cpe.sw_edition = $sw_edition,
-                    cpe.target_sw = $target_sw,
-                    cpe.target_hw = $target_hw,
-                    cpe.other = $other
                 MERGE (c:CVE {cve_id: $cve_id})
                 MERGE (c)-[:AFFECTS]->(cpe)
             """, {**cpe_props, "cve_id": cve_id})

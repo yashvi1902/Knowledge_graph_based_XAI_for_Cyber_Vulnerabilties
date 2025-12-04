@@ -35,6 +35,52 @@ def node_to_dict(node):
     d["labels"] = list(node.labels)
     return d
 
+def clean_cpe_node(cpe_node):
+    """
+    Convert a CPE Neo4j node to a dict and drop any fields that are
+    'not specified', '*', '-', empty, or None. Keeps labels.
+    """
+    if cpe_node is None:
+        return None
+
+    raw = node_to_dict(cpe_node)   # includes properties + labels
+    labels = raw.pop("labels", []) # keep labels separate
+
+    cleaned_props = {}
+
+    INVALID_STRINGS_LOWER = {
+        "not specified",
+        "n/a",
+        "none",
+        "",          # empty after strip
+    }
+    INVALID_EXACT = {"*", "-"}
+
+    for key, value in raw.items():
+        # Always keep non-scalar stuff (just in case), but most CPE fields are strings
+        if value is None:
+            continue
+
+        if isinstance(value, str):
+            v = value.strip()
+            # Skip clearly non-real values
+            if v.lower() in INVALID_STRINGS_LOWER:
+                continue
+            if v in INVALID_EXACT:
+                continue
+            # If it survives the checks, keep it
+            cleaned_props[key] = v
+        else:
+            # Non-string values (if any) are kept as-is
+            cleaned_props[key] = value
+
+    # If nothing meaningful remains, you can decide whether to drop this CPE entirely
+    if not cleaned_props:
+        return None
+
+    cleaned_props["labels"] = labels
+    return cleaned_props
+
 
 # -----------------------------
 # Lifespan events
@@ -71,13 +117,9 @@ def get_cve(cve_id: str):
             MATCH (c:CVE {cve_id: $cve_id})
             OPTIONAL MATCH (c)-[:HAS_WEAKNESS]->(w:CWE)
             OPTIONAL MATCH (c)-[:AFFECTS]->(cpe:CPE)
-            OPTIONAL MATCH (c)-[:HAS_EXPLOIT]->(e:Exploit)
-            OPTIONAL MATCH (c)-[:LISTED_IN_KEV]->(k:KEV)
             RETURN c,
                    collect(DISTINCT w)   AS cwes,
-                   collect(DISTINCT cpe) AS cpes,
-                   collect(DISTINCT e)   AS exploits,
-                   collect(DISTINCT k)   AS kev_list
+                   collect(DISTINCT cpe) AS cpes
             """,
             {"cve_id": cve_id},
         ).single()
@@ -88,15 +130,23 @@ def get_cve(cve_id: str):
     cve_node = result["c"]
     cwes = result["cwes"]
     cpes = result["cpes"]
-    exploits = result["exploits"]
-    kev_list = result["kev_list"]
+    # exploits = result["exploits"]
+    # kev_list = result["kev_list"]
+    
+    cleaned_cpes = []
+    for cpe in cpes:
+        if cpe is None:
+            continue
+        cleaned = clean_cpe_node(cpe)
+        if cleaned is not None:
+            cleaned_cpes.append(cleaned)
 
     return {
         "cve": node_to_dict(cve_node),
         "cwes": [node_to_dict(w) for w in cwes if w is not None],
-        "cpes": [node_to_dict(cpe) for cpe in cpes if cpe is not None],
-        "exploits": [node_to_dict(e) for e in exploits if e is not None],
-        "kev": node_to_dict(kev_list[0]) if kev_list else None,
+        "cpes": cleaned_cpes,
+        # "exploits": [node_to_dict(e) for e in exploits if e is not None],
+        # "kev": node_to_dict(kev_list[0]) if kev_list else None,
     }
 
 
@@ -136,6 +186,9 @@ def list_cves(page: int = 1, page_size: int = 20):
                     "last_modified": data.get("last_modified"),
                     "status": data.get("status"),
                     "source": data.get("source"),
+                    # "cvss_score": data.get("cvss_score"),
+                    # "cvss_severity": data.get("cvss_severity"),
+                    # "cvss_version": data.get("cvss_version"),
                 }
             )
 
