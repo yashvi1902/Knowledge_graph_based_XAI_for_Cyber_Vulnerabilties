@@ -19,23 +19,7 @@ def fetch_cisa_kev():
     with open(out_file, "w", encoding="utf-8") as f:
         json.dump(kev, f, indent=2)
     print(f" Saved CISA KEV: {out_file}")
-
-
-# --- 2. MITRE ATT&CK (via pyattck) ---
-def fetch_mitre_attack():
-    url = "https://raw.githubusercontent.com/mitre/cti/master/enterprise-attack/enterprise-attack.json"
-    resp = requests.get(url)
-    resp.raise_for_status()
-
-    data = resp.json()
-
-    out_path = Path(__file__).resolve().parents[1] / "data" / "mitre_attack.json"
-    with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-
-    print(f"Saved MITRE ATT&CK: {out_path}")
-
-
+    
 # --- 3. ExploitDB ---
 def fetch_exploitdb():
     url = "https://gitlab.com/exploit-database/exploitdb/-/raw/main/files_exploits.csv"
@@ -47,7 +31,6 @@ def fetch_exploitdb():
 
 if __name__ == "__main__":
     print("Fetching external datasets...")
-    # fetch_cisa_kev()
-    fetch_mitre_attack()
+    fetch_cisa_kev()
     fetch_exploitdb()
     print(" All external datasets collected")

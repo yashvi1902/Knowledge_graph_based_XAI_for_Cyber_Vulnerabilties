@@ -29,7 +29,7 @@ for cve in cves_raw:
     cvss_v31 = None
     cvss_v40 = None
 
-        # CVSS v2
+    # CVSS v2
     if "cvssMetricV2" in cve_meta:
         cvss_v2 = cve_meta["cvssMetricV2"][0].get("details", {}).get("baseScore") \
                 or cve_meta["cvssMetricV2"][0].get("cvssData", {}).get("baseScore")
@@ -117,35 +117,4 @@ if cisa_path.exists():
     print(f" CISA KEV table: {len(kev_rows)} rows")
 else:
     print(" CISA KEV JSON not found!")
-
-# -------------------------------------------
-# MITRE STIX JSON → techniques + relationships
-
-mitre_path = DATA_DIR / "mitre_attack.json"
-if mitre_path.exists():
-    with open(mitre_path, "r", encoding="utf-8") as f:
-        mitre_json = json.load(f)
-    
-    techniques_rows = []
-    relations_rows = []
-    
-    for obj in mitre_json.get("objects", []):
-        if obj.get("type") == "attack-pattern":  # techniques
-            techniques_rows.append({
-                "technique_id": obj.get("id"),
-                "name": obj.get("name"),
-                "description": obj.get("description")
-            })
-        elif obj.get("type") == "relationship":
-            relations_rows.append({
-                "source_id": obj.get("source_ref"),
-                "target_id": obj.get("target_ref"),
-                "type": obj.get("relationship_type")
-            })
-
-    pd.DataFrame(techniques_rows).to_csv(DATA_DIR / "mitre_techniques.csv", index=False)
-    pd.DataFrame(relations_rows).to_csv(DATA_DIR / "mitre_relations.csv", index=False)
-    print(f" MITRE tables: {len(techniques_rows)} techniques, {len(relations_rows)} relations")
-else:
-    print(" MITRE JSON not found!")
 
