@@ -1,16 +1,75 @@
+import os
+import time
 from neo4j import GraphDatabase
+from neo4j.exceptions import ServiceUnavailable, SessionExpired, TransientError
 import pandas as pd
 import json
 from config import NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD
 
 DATA_DIR = "/Users/yashvinavadia/Desktop/CSUF/ctrp/data/"
+CHECKPOINT_FILE = os.path.join(DATA_DIR, "kg_checkpoint.json")  # NEW
+
 
 class GraphBuilder:
     def __init__(self, uri, user, password):
+        # store creds so we can recreate driver on reconnect  # NEW
+        self.uri = uri
+        self.user = user
+        self.password = password
         self.driver = GraphDatabase.driver(uri, auth=(user, password))
+        self.checkpoint = {
+            "cve_idx": 0,
+            "cwe_idx": 0,
+            "kev_idx": 0,
+            "exploit_idx": 0,
+        }
 
     def close(self):
         self.driver.close()
+
+    # -----------------------------------------
+    # CHECKPOINT HELPERS (NEW)
+    # -----------------------------------------
+    def _load_checkpoint(self):
+        if os.path.exists(CHECKPOINT_FILE):
+            try:
+                with open(CHECKPOINT_FILE, "r") as f:
+                    self.checkpoint = json.load(f)
+                    print(f"[INFO] Loaded checkpoint: {self.checkpoint}")
+            except Exception as e:
+                print(f"[WARN] Failed to read checkpoint file: {e}. Starting from 0.")
+        else:
+            print("[INFO] No checkpoint file found. Starting from 0.")
+
+    def _save_checkpoint(self):
+        try:
+            with open(CHECKPOINT_FILE, "w") as f:
+                json.dump(self.checkpoint, f)
+            # You can comment this out if too noisy:
+            print(f"[INFO] Checkpoint saved: {self.checkpoint}")
+        except Exception as e:
+            print(f"[WARN] Failed to write checkpoint file: {e}")
+
+    # -----------------------------------------
+    # SAFE WRITE WRAPPER (NEW)
+    # -----------------------------------------
+    def _safe_write(self, func, *args):
+        """
+        Execute a write transaction with infinite retry and automatic reconnection.
+        """
+        while True:
+            try:
+                with self.driver.session() as session:
+                    return session.execute_write(func, *args)
+            except (ServiceUnavailable, SessionExpired, TransientError) as e:
+                print(f"[WARN] Neo4j connection error: {e}. Retrying in 5 seconds...")
+                time.sleep(5)
+                # Recreate driver in case it is dead
+                try:
+                    self.driver.close()
+                except Exception:
+                    pass
+                self.driver = GraphDatabase.driver(self.uri, auth=(self.user, self.password))
 
     # -----------------------------------------
     # LOAD ALL DATA
@@ -148,22 +207,31 @@ class GraphBuilder:
                 MERGE (c)-[:HAS_WEAKNESS]->(w)
             """, {"cve_id": cve_id, "cwe_id": w})
 
-       # CPEs
+        # CPEs
         for cpe_uri in cve.get("configurations", []):
             parts = cpe_uri.split(":")
 
-            # Ensure valid CPE
+            # CPE 2.3 must have at least 13 components
             if len(parts) < 13:
                 print(f"Skipping invalid CPE: {cpe_uri}")
                 continue
 
+            def norm(v):
+                return v if v not in ["*", "-"] else "Not Specified"
+
             cpe_props = {
                 "cpe_uri": cpe_uri,
-                "part": parts[2],               # a/o/h
-                "vendor": parts[3],
-                "product": parts[4],
-                "version": parts[5] if parts[5] not in ["*", "-"] else 'Not Specified',
-                "update": parts[6] if parts[6] not in ["*", "-"] else 'Not Specified',
+                "part": norm(parts[2]),
+                "vendor": norm(parts[3]),
+                "product": norm(parts[4]),
+                "version": norm(parts[5]),
+                "update": norm(parts[6]),
+                "edition": norm(parts[7]),
+                "language": norm(parts[8]),
+                "sw_edition": norm(parts[9]),
+                "target_sw": norm(parts[10]),
+                "target_hw": norm(parts[11]),
+                "other": norm(parts[12]),
             }
 
             tx.run("""
@@ -174,10 +242,16 @@ class GraphBuilder:
                     cpe.product = $product,
                     cpe.version = $version,
                     cpe.update = $update,
+                    cpe.edition = $edition,
+                    cpe.language = $language,
+                    cpe.sw_edition = $sw_edition,
+                    cpe.target_sw = $target_sw,
+                    cpe.target_hw = $target_hw,
+                    cpe.other = $other
+                WITH cpe
                 MERGE (c:CVE {cve_id: $cve_id})
                 MERGE (c)-[:AFFECTS]->(cpe)
             """, {**cpe_props, "cve_id": cve_id})
-
 
         # References
         for ref in cve.get("references", []):
@@ -188,42 +262,72 @@ class GraphBuilder:
                 MERGE (c)-[:HAS_REFERENCE]->(r)
             """, {"cve_id": cve_id, "url": ref["url"], "tags": ref.get("tags", [])})
 
-
     def ingest_cwe(self, tx, row):
+        # Normalize CWE-ID to "CWE-71" style
+        raw_id = str(row["CWE-ID"]).strip()
+        if not raw_id:
+            return
+
+        if raw_id.startswith("CWE-"):
+            cwe_id = raw_id
+        else:
+            cwe_id = f"CWE-{raw_id}"
+
         tx.run("""
             MERGE (w:CWE {cwe_id: $cwe_id})
             SET w.name = $name,
                 w.abstraction = $abstraction,
                 w.description = $description
         """, {
-            "cwe_id": row["CWE-ID"],
+            "cwe_id": cwe_id,
             "name": row["Name"],
             "abstraction": row["Weakness Abstraction"],
             "description": row["Description"]
         })
 
-    def ingest_kev(self, tx, kev):
-        tx.run("""
-            MERGE (k:KEV {cve_id: $cve_id})
-            SET k.vendor = $vendor,
-                k.product = $product,
-                k.name = $name,
-                k.date_added = $date_added,
-                k.due_date = $due_date
-        """, {
-            "cve_id": kev["cveID"],
-            "vendor": kev["vendorProject"],
-            "product": kev["product"],
-            "name": kev["vulnerabilityName"],
-            "date_added": kev["dateAdded"],
-            "due_date": kev["dueDate"]
-        })
 
-        tx.run("""
+    def ingest_kev(self, tx, kev):
+        """
+        Ingest a single CISA KEV entry and link it to the CVE node.
+        """
+        tx.run(
+            """
+            MERGE (k:KEV {cve_id: $cve_id})
+            SET k.vendor                         = $vendor,
+                k.product                        = $product,
+                k.name                           = $name,
+                k.date_added                     = $date_added,
+                k.due_date                       = $due_date,
+                k.short_description              = $short_description,
+                k.required_action                = $required_action,
+                k.known_ransomware_campaign_use  = $known_ransomware_campaign_use,
+                k.notes                          = $notes,
+                k.cwes                           = $cwes
+            """,
+            {
+                "cve_id": kev["cveID"],
+                "vendor": kev.get("vendorProject"),
+                "product": kev.get("product"),
+                "name": kev.get("vulnerabilityName"),
+                "date_added": kev.get("dateAdded"),
+                "due_date": kev.get("dueDate"),
+                "short_description": kev.get("shortDescription"),
+                "required_action": kev.get("requiredAction"),
+                "known_ransomware_campaign_use": kev.get("knownRansomwareCampaignUse"),
+                "notes": kev.get("notes"),
+                "cwes": kev.get("cwes"),
+            },
+        )
+
+        tx.run(
+            """
             MATCH (c:CVE {cve_id: $cve_id})
             MATCH (k:KEV {cve_id: $cve_id})
             MERGE (c)-[:LISTED_IN_KEV]->(k)
-        """, {"cve_id": kev["cveID"]})
+            """,
+            {"cve_id": kev["cveID"]},
+        )
+
 
     def ingest_exploit(self, tx, row):
         tx.run("""
@@ -257,35 +361,70 @@ class GraphBuilder:
                     """, {"id": row["id"], "cve": code})
 
     # -----------------------------------------
-    # BUILD GRAPH (Main Pipeline)
+    # BUILD GRAPH (Main Pipeline)  — UPDATED TO USE CHECKPOINTS
     # -----------------------------------------
     def build_graph(self):
         self.load_data()
+        self._load_checkpoint()
 
-        with self.driver.session() as session:
+        try:
+            # # Ingest CVEs
+            # print("Ingesting CVEs…")
+            # total_cves = len(self.cve_data)
+            # for idx in range(self.checkpoint["cve_idx"], total_cves):
+            #     cve = self.cve_data[idx]
+            #     self._safe_write(self.ingest_cve, cve)
+            #     self.checkpoint["cve_idx"] = idx + 1
+            #     if idx % 100 == 0:  # save every 100 records (tune as you like)
+            #         self._save_checkpoint()
 
-            print("Ingesting CVEs…")
-            for cve in self.cve_data:
-                session.execute_write(self.ingest_cve, cve)
-
+            # Ingest CWEs
             print("Ingesting CWEs…")
-            for _, row in self.cwe_df.iterrows():
-                session.execute_write(self.ingest_cwe, row)
+            total_cwes = len(self.cwe_df)
+            for idx in range(self.checkpoint["cwe_idx"], total_cwes):
+                row = self.cwe_df.iloc[idx]
+                self._safe_write(self.ingest_cwe, row)
+                self.checkpoint["cwe_idx"] = idx + 1
+                if idx % 100 == 0:
+                    self._save_checkpoint()
 
-            print("Ingesting CISA KEV…")
-            for kev in self.kev_data["vulnerabilities"]:
-                session.execute_write(self.ingest_kev, kev)
+            # Ingest CISA KEV
+            # print("Ingesting CISA KEV…")
+            # kev_list = self.kev_data["vulnerabilities"]
+            # total_kev = len(kev_list)
+            # for idx in range(self.checkpoint["kev_idx"], total_kev):
+            #     kev = kev_list[idx]
+            #     self._safe_write(self.ingest_kev, kev)
+            #     self.checkpoint["kev_idx"] = idx + 1
+            #     if idx % 100 == 0:
+            #         self._save_checkpoint()
 
-            print("Ingesting ExploitDB…")
-            for _, row in self.exploit_df.iterrows():
-                session.execute_write(self.ingest_exploit, row)
+            # Ingest ExploitDB
+            # print("Ingesting ExploitDB…")
+            # total_exploits = len(self.exploit_df)
+            # for idx in range(self.checkpoint["exploit_idx"], total_exploits):
+            #     row = self.exploit_df.iloc[idx]
+            #     self._safe_write(self.ingest_exploit, row)
+            #     self.checkpoint["exploit_idx"] = idx + 1
+            #     if idx % 100 == 0:
+            #         self._save_checkpoint()
 
-        print("🎉 Knowledge Graph Created Successfully!")
+            # Final save
+            self._save_checkpoint()
+            print("🎉 Knowledge Graph Created Successfully!")
+
+        except KeyboardInterrupt:
+            print("\n[INFO] Interrupted by user, saving checkpoint...")
+            self._save_checkpoint()
+            raise
+
 
 # -----------------------------------------
 # MAIN RUNNER
 # -----------------------------------------
 def build_knowledge_graph():
     builder = GraphBuilder(NEO4J_URI, NEO4J_USER, NEO4J_PASSWORD)
-    builder.build_graph()
-    builder.close()
+    try:
+        builder.build_graph()
+    finally:
+        builder.close()
